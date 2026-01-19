@@ -9,6 +9,7 @@ import { Separator } from '@/components/ui/separator'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 
 type Severity = 'error' | 'warning' | 'info'
 type Finding = {
@@ -43,6 +44,14 @@ type AuditResult = {
     itemsCount: number
     hasNfeProc: boolean
     accessKey?: string
+
+    emitName?: string
+    destName?: string
+    nNF?: string
+    serie?: string
+    dhEmi?: string
+    vNF?: number
+
     totals?: TotalsMeta
     sums?: SumsMeta
   }
@@ -50,10 +59,21 @@ type AuditResult = {
   findings: Finding[]
 }
 
+type BatchRow = {
+  fileName: string
+  size: number
+  result?: AuditResult
+  error?: string
+}
+
 function severityBadge(sev: Severity) {
   if (sev === 'error') return <Badge variant="destructive">Erro</Badge>
   if (sev === 'warning') return <Badge variant="secondary">Alerta</Badge>
   return <Badge variant="outline">Info</Badge>
+}
+
+function okBadge(ok: boolean) {
+  return ok ? <Badge variant="outline">OK</Badge> : <Badge variant="secondary">Com alertas</Badge>
 }
 
 function formatBRL(v: number | undefined) {
@@ -87,7 +107,14 @@ async function copyToClipboard(text: string) {
   }
 }
 
+function csvEscape(v: any) {
+  const s = String(v ?? '')
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+  return s
+}
+
 export default function AuditarPage() {
+  // ---- SINGLE ----
   const [xml, setXml] = useState('')
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<AuditResult | null>(null)
@@ -99,6 +126,13 @@ export default function AuditarPage() {
   const [copiedJson, setCopiedJson] = useState(false)
   const [copiedFindingKey, setCopiedFindingKey] = useState<string | null>(null)
 
+  // ---- BATCH ----
+  const [batchRows, setBatchRows] = useState<BatchRow[]>([])
+  const [batchLoading, setBatchLoading] = useState(false)
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 })
+  const [batchQuery, setBatchQuery] = useState('')
+  const [batchCopied, setBatchCopied] = useState<string | null>(null)
+
   const filtered = useMemo(() => {
     if (!result) return []
     const base = filter === 'all' ? result.findings : result.findings.filter((f) => f.severity === filter)
@@ -107,20 +141,31 @@ export default function AuditarPage() {
     if (!q) return base
 
     return base.filter((f) => {
-      const hay = [
-        f.severity,
-        f.code,
-        f.title,
-        f.message,
-        f.path ?? '',
-        f.hint ?? '',
-      ]
-        .join(' ')
-        .toLowerCase()
-
+      const hay = [f.severity, f.code, f.title, f.message, f.path ?? '', f.hint ?? ''].join(' ').toLowerCase()
       return hay.includes(q)
     })
   }, [result, filter, query])
+
+  const totals = result?.meta.totals
+  const sums = result?.meta.sums
+
+  const vnfExpected =
+    totals?.vProd !== undefined
+      ? Number(
+          (
+            (totals.vProd || 0) +
+            (totals.vFrete || 0) +
+            (totals.vSeg || 0) +
+            (totals.vOutro || 0) -
+            (totals.vDesc || 0)
+          ).toFixed(2)
+        )
+      : undefined
+
+  const vnfDiff =
+    totals?.vNF !== undefined && vnfExpected !== undefined
+      ? Number((vnfExpected - (totals.vNF || 0)).toFixed(2))
+      : undefined
 
   async function onAnalyze() {
     setErr(null)
@@ -190,258 +235,528 @@ export default function AuditarPage() {
     setTimeout(() => setCopiedFindingKey(null), 1200)
   }
 
-  const totals = result?.meta.totals
-  const sums = result?.meta.sums
+  // -------- BATCH handlers --------
+  async function onPickBatchFiles(files: FileList | null) {
+    if (!files || files.length === 0) return
+    const arr = Array.from(files)
+    const next: BatchRow[] = arr.map((f) => ({ fileName: f.name, size: f.size }))
+    setBatchRows(next)
+    setBatchProgress({ done: 0, total: next.length })
+  }
 
-  const vnfExpected =
-    totals?.vProd !== undefined
-      ? Number(
-          (
-            (totals.vProd || 0) +
-            (totals.vFrete || 0) +
-            (totals.vSeg || 0) +
-            (totals.vOutro || 0) -
-            (totals.vDesc || 0)
-          ).toFixed(2)
-        )
-      : undefined
+  async function runBatch(files: FileList | null) {
+    if (!files || files.length === 0) return
+    setBatchLoading(true)
+    const arr = Array.from(files)
 
-  const vnfDiff =
-    totals?.vNF !== undefined && vnfExpected !== undefined
-      ? Number((vnfExpected - (totals.vNF || 0)).toFixed(2))
-      : undefined
+    const rows: BatchRow[] = arr.map((f) => ({ fileName: f.name, size: f.size }))
+    setBatchRows(rows)
+    setBatchProgress({ done: 0, total: rows.length })
+
+    let done = 0
+
+    for (let i = 0; i < arr.length; i++) {
+      const file = arr[i]
+      try {
+        const xmlText = await file.text()
+        const res = await fetch('/api/audit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ xml: xmlText }),
+        })
+        const data = (await res.json()) as AuditResult
+
+        rows[i] = { ...rows[i], result: data }
+      } catch (e: any) {
+        rows[i] = { ...rows[i], error: 'Falha ao analisar este arquivo.' }
+      }
+
+      done++
+      setBatchRows([...rows])
+      setBatchProgress({ done, total: rows.length })
+    }
+
+    setBatchLoading(false)
+  }
+
+  const batchFiltered = useMemo(() => {
+    const q = batchQuery.trim().toLowerCase()
+    if (!q) return batchRows
+    return batchRows.filter((r) => {
+      const m = r.result?.meta
+      const hay = [
+        r.fileName,
+        m?.accessKey ?? '',
+        m?.emitName ?? '',
+        m?.destName ?? '',
+        m?.nNF ?? '',
+        m?.serie ?? '',
+        m?.dhEmi ?? '',
+        String(m?.vNF ?? ''),
+        String(r.result?.summary?.errors ?? ''),
+        String(r.result?.summary?.warnings ?? ''),
+      ]
+        .join(' ')
+        .toLowerCase()
+      return hay.includes(q)
+    })
+  }, [batchRows, batchQuery])
+
+  function exportBatchJson() {
+    const payload = batchRows.map((r) => ({
+      fileName: r.fileName,
+      size: r.size,
+      error: r.error,
+      result: r.result,
+    }))
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'auditoria-nfe-lote.json'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
+  function exportBatchCsv() {
+    const headers = [
+      'arquivo',
+      'ok',
+      'erros',
+      'alertas',
+      'infos',
+      'chave',
+      'emitente',
+      'destinatario',
+      'nNF',
+      'serie',
+      'dhEmi',
+      'vNF',
+    ]
+
+    const lines = [headers.join(',')]
+
+    for (const r of batchRows) {
+      const m = r.result?.meta
+      const s = r.result?.summary
+      const row = [
+        csvEscape(r.fileName),
+        csvEscape(r.result ? (r.result.ok ? 'OK' : 'NAO_OK') : 'ERRO'),
+        csvEscape(s?.errors ?? ''),
+        csvEscape(s?.warnings ?? ''),
+        csvEscape(s?.infos ?? ''),
+        csvEscape(m?.accessKey ?? ''),
+        csvEscape(m?.emitName ?? ''),
+        csvEscape(m?.destName ?? ''),
+        csvEscape(m?.nNF ?? ''),
+        csvEscape(m?.serie ?? ''),
+        csvEscape(m?.dhEmi ?? ''),
+        csvEscape(m?.vNF ?? ''),
+      ]
+      lines.push(row.join(','))
+    }
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'auditoria-nfe-lote.csv'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
+  async function copyBatchValue(key: string, value: string) {
+    if (!value) return
+    const ok = await copyToClipboard(value)
+    if (!ok) return
+    setBatchCopied(key)
+    setTimeout(() => setBatchCopied(null), 1200)
+  }
 
   return (
-    <div className="mx-auto max-w-5xl p-6 space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle>Auditar NF-e (pré-SEFAZ)</CardTitle>
-          <CardDescription>
-            Cole o XML da NF-e (ou envie o arquivo). A análise roda e mostra inconsistências comuns de preenchimento e totais.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-3">
-              <input
-                type="file"
-                accept=".xml,text/xml,application/xml"
-                onChange={(e) => {
-                  const f = e.target.files?.[0]
-                  if (f) onPickFile(f)
-                }}
-              />
-              <Button variant="secondary" onClick={() => setXml('')} disabled={loading || !xml}>
-                Limpar
-              </Button>
-            </div>
+    <div className="mx-auto max-w-6xl p-6 space-y-6">
+      <Tabs defaultValue="single">
+        <TabsList>
+          <TabsTrigger value="single">Único</TabsTrigger>
+          <TabsTrigger value="batch">Lote</TabsTrigger>
+        </TabsList>
 
-            <Button onClick={onAnalyze} disabled={loading || xml.trim().length < 10}>
-              {loading ? 'Analisando...' : 'Analisar'}
-            </Button>
-          </div>
-
-          <Textarea
-            value={xml}
-            onChange={(e) => setXml(e.target.value)}
-            placeholder="Cole aqui o conteúdo do XML (.xml) da NF-e..."
-            className="min-h-[260px] font-mono text-xs"
-          />
-
-          {err && (
-            <Alert variant="destructive">
-              <AlertTitle>Erro</AlertTitle>
-              <AlertDescription>{err}</AlertDescription>
-            </Alert>
-          )}
-        </CardContent>
-      </Card>
-
-      {result && (
-        <Card>
-          <CardHeader className="space-y-2">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="space-y-1">
-                <CardTitle>Resultado</CardTitle>
-                <CardDescription>
-                  Itens: <b>{result.meta.itemsCount}</b> · nfeProc: <b>{result.meta.hasNfeProc ? 'sim' : 'não'}</b>
-                  {result.meta.accessKey ? (
-                    <>
-                      {' '}
-                      · chave: <b className="font-mono text-xs">{result.meta.accessKey}</b>
-                    </>
-                  ) : null}
-                </CardDescription>
-              </div>
-
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" onClick={exportJson}>
-                  Exportar JSON
-                </Button>
-                <Button variant="outline" onClick={copyWholeJson}>
-                  {copiedJson ? 'Copiado!' : 'Copiar JSON'}
-                </Button>
-                {result.meta.accessKey && (
-                  <Button variant="outline" onClick={copyAccessKey}>
-                    {copiedKey ? 'Copiado!' : 'Copiar chave'}
+        {/* ---------------- SINGLE ---------------- */}
+        <TabsContent value="single" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Auditar NF-e (pré-SEFAZ)</CardTitle>
+              <CardDescription>
+                Cole o XML da NF-e (ou envie o arquivo). A análise roda e mostra inconsistências comuns de preenchimento e totais.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-center gap-3">
+                  <input
+                    type="file"
+                    accept=".xml,text/xml,application/xml"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0]
+                      if (f) onPickFile(f)
+                    }}
+                  />
+                  <Button variant="secondary" onClick={() => setXml('')} disabled={loading || !xml}>
+                    Limpar
                   </Button>
-                )}
-              </div>
-            </div>
+                </div>
 
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex flex-wrap gap-2">
-                <Button size="sm" variant={filter === 'all' ? 'default' : 'secondary'} onClick={() => setFilter('all')}>
-                  Todos ({result.findings.length})
-                </Button>
-                <Button
-                  size="sm"
-                  variant={filter === 'error' ? 'default' : 'secondary'}
-                  onClick={() => setFilter('error')}
-                >
-                  Erros ({result.summary.errors})
-                </Button>
-                <Button
-                  size="sm"
-                  variant={filter === 'warning' ? 'default' : 'secondary'}
-                  onClick={() => setFilter('warning')}
-                >
-                  Alertas ({result.summary.warnings})
-                </Button>
-                <Button
-                  size="sm"
-                  variant={filter === 'info' ? 'default' : 'secondary'}
-                  onClick={() => setFilter('info')}
-                >
-                  Infos ({result.summary.infos})
+                <Button onClick={onAnalyze} disabled={loading || xml.trim().length < 10}>
+                  {loading ? 'Analisando...' : 'Analisar'}
                 </Button>
               </div>
 
-              <div className="sm:w-[340px]">
-                <Input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Buscar (código, título, mensagem, caminho...)"
-                />
-              </div>
-            </div>
-          </CardHeader>
+              <Textarea
+                value={xml}
+                onChange={(e) => setXml(e.target.value)}
+                placeholder="Cole aqui o conteúdo do XML (.xml) da NF-e..."
+                className="min-h-[260px] font-mono text-xs"
+              />
 
-          <CardContent className="space-y-4">
-            <Separator />
+              {err && (
+                <Alert variant="destructive">
+                  <AlertTitle>Erro</AlertTitle>
+                  <AlertDescription>{err}</AlertDescription>
+                </Alert>
+              )}
+            </CardContent>
+          </Card>
 
-            {/* Resumo Financeiro */}
-            {totals && (
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                <div className="rounded-lg border p-3">
-                  <div className="text-xs text-muted-foreground">vProd</div>
-                  <div className="text-lg font-semibold">{formatBRL(totals.vProd)}</div>
-                  {sums?.vProd !== undefined && (
-                    <div className="text-xs text-muted-foreground">Soma itens: {formatBRL(sums.vProd)}</div>
-                  )}
-                </div>
+          {result && (
+            <Card>
+              <CardHeader className="space-y-2">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="space-y-1">
+                    <CardTitle>Resultado</CardTitle>
+                    <CardDescription>
+                      Itens: <b>{result.meta.itemsCount}</b> · nfeProc: <b>{result.meta.hasNfeProc ? 'sim' : 'não'}</b>
+                      {result.meta.accessKey ? (
+                        <>
+                          {' '}
+                          · chave: <b className="font-mono text-xs">{result.meta.accessKey}</b>
+                        </>
+                      ) : null}
+                    </CardDescription>
 
-                <div className="rounded-lg border p-3">
-                  <div className="text-xs text-muted-foreground">vDesc</div>
-                  <div className="text-lg font-semibold">{formatBRL(totals.vDesc ?? 0)}</div>
-                  {sums?.vDesc !== undefined && (
-                    <div className="text-xs text-muted-foreground">Soma itens: {formatBRL(sums.vDesc)}</div>
-                  )}
-                </div>
-
-                <div className="rounded-lg border p-3">
-                  <div className="text-xs text-muted-foreground">vFrete / vSeg / vOutro</div>
-                  <div className="text-sm font-semibold">
-                    {formatBRL(totals.vFrete ?? 0)} / {formatBRL(totals.vSeg ?? 0)} / {formatBRL(totals.vOutro ?? 0)}
-                  </div>
-                  {sums && (
-                    <div className="text-xs text-muted-foreground">
-                      Itens: {formatBRL(sums.vFrete)} / {formatBRL(sums.vSeg)} / {formatBRL(sums.vOutro)}
-                    </div>
-                  )}
-                </div>
-
-                <div className="rounded-lg border p-3 sm:col-span-2 lg:col-span-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-xs text-muted-foreground">vNF (Total NF)</div>
-                      <div className="text-2xl font-semibold">{formatBRL(totals.vNF)}</div>
-                    </div>
-
-                    {vnfExpected !== undefined && totals.vNF !== undefined && (
-                      <div className="text-right">
-                        <div className="text-xs text-muted-foreground">Composição esperada</div>
-                        <div className="text-sm font-semibold">{formatBRL(vnfExpected)}</div>
-                        {vnfDiff !== undefined && (
-                          <div className="text-xs text-muted-foreground">
-                            Diferença: <span className="font-mono">{formatNum(vnfDiff)}</span>
-                          </div>
-                        )}
+                    {(result.meta.emitName || result.meta.destName || result.meta.nNF || result.meta.serie) && (
+                      <div className="text-xs text-muted-foreground">
+                        {result.meta.emitName ? <span><b>Emit:</b> {result.meta.emitName} · </span> : null}
+                        {result.meta.destName ? <span><b>Dest:</b> {result.meta.destName} · </span> : null}
+                        {result.meta.nNF ? <span><b>nNF:</b> {result.meta.nNF} · </span> : null}
+                        {result.meta.serie ? <span><b>Série:</b> {result.meta.serie}</span> : null}
                       </div>
                     )}
                   </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" onClick={exportJson}>
+                      Exportar JSON
+                    </Button>
+                    <Button variant="outline" onClick={copyWholeJson}>
+                      {copiedJson ? 'Copiado!' : 'Copiar JSON'}
+                    </Button>
+                    {result.meta.accessKey && (
+                      <Button variant="outline" onClick={copyAccessKey}>
+                        {copiedKey ? 'Copiado!' : 'Copiar chave'}
+                      </Button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
 
-            <ScrollArea className="h-[520px] pr-4">
-              <div className="space-y-3">
-                {filtered.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">Nenhum item para este filtro/busca.</div>
-                ) : (
-                  filtered.map((f, idx) => (
-                    <div key={`${f.code}-${idx}`} className="rounded-lg border p-4 space-y-2">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2">
-                            {severityBadge(f.severity)}
-                            <span className="text-sm font-semibold">{f.title}</span>
-                            <span className="text-xs text-muted-foreground font-mono">{f.code}</span>
-                          </div>
-                          <div className="text-sm">{f.message}</div>
-                        </div>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" variant={filter === 'all' ? 'default' : 'secondary'} onClick={() => setFilter('all')}>
+                      Todos ({result.findings.length})
+                    </Button>
+                    <Button size="sm" variant={filter === 'error' ? 'default' : 'secondary'} onClick={() => setFilter('error')}>
+                      Erros ({result.summary.errors})
+                    </Button>
+                    <Button size="sm" variant={filter === 'warning' ? 'default' : 'secondary'} onClick={() => setFilter('warning')}>
+                      Alertas ({result.summary.warnings})
+                    </Button>
+                    <Button size="sm" variant={filter === 'info' ? 'default' : 'secondary'} onClick={() => setFilter('info')}>
+                      Infos ({result.summary.infos})
+                    </Button>
+                  </div>
 
-                        <div className="flex flex-wrap gap-2">
-                          <Button size="sm" variant="outline" onClick={() => copyFinding(f, 'message')}>
-                            {copiedFindingKey === `${f.code}-message` ? 'Copiado!' : 'Copiar'}
-                          </Button>
-                          <Button size="sm" variant="outline" onClick={() => copyFinding(f, 'json')}>
-                            {copiedFindingKey === `${f.code}-json` ? 'Copiado!' : 'JSON'}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={!f.path}
-                            onClick={() => copyFinding(f, 'path')}
-                          >
-                            {copiedFindingKey === `${f.code}-path` ? 'Copiado!' : 'Caminho'}
-                          </Button>
-                        </div>
+                  <div className="sm:w-[340px]">
+                    <Input
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      placeholder="Buscar (código, título, mensagem, caminho...)"
+                    />
+                  </div>
+                </div>
+              </CardHeader>
+
+              <CardContent className="space-y-4">
+                <Separator />
+
+                {/* Resumo Financeiro */}
+                {totals && (
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    <div className="rounded-lg border p-3">
+                      <div className="text-xs text-muted-foreground">vProd</div>
+                      <div className="text-lg font-semibold">{formatBRL(totals.vProd)}</div>
+                      {sums?.vProd !== undefined && (
+                        <div className="text-xs text-muted-foreground">Soma itens: {formatBRL(sums.vProd)}</div>
+                      )}
+                    </div>
+
+                    <div className="rounded-lg border p-3">
+                      <div className="text-xs text-muted-foreground">vDesc</div>
+                      <div className="text-lg font-semibold">{formatBRL(totals.vDesc ?? 0)}</div>
+                      {sums?.vDesc !== undefined && (
+                        <div className="text-xs text-muted-foreground">Soma itens: {formatBRL(sums.vDesc)}</div>
+                      )}
+                    </div>
+
+                    <div className="rounded-lg border p-3">
+                      <div className="text-xs text-muted-foreground">vFrete / vSeg / vOutro</div>
+                      <div className="text-sm font-semibold">
+                        {formatBRL(totals.vFrete ?? 0)} / {formatBRL(totals.vSeg ?? 0)} / {formatBRL(totals.vOutro ?? 0)}
                       </div>
-
-                      {(f.path || f.hint) && (
-                        <div className="text-xs text-muted-foreground space-y-1">
-                          {f.path ? (
-                            <div>
-                              <span className="font-medium">Caminho:</span>{' '}
-                              <span className="font-mono">{f.path}</span>
-                            </div>
-                          ) : null}
-                          {f.hint ? (
-                            <div>
-                              <span className="font-medium">Dica:</span> {f.hint}
-                            </div>
-                          ) : null}
+                      {sums && (
+                        <div className="text-xs text-muted-foreground">
+                          Itens: {formatBRL(sums.vFrete)} / {formatBRL(sums.vSeg)} / {formatBRL(sums.vOutro)}
                         </div>
                       )}
                     </div>
-                  ))
+
+                    <div className="rounded-lg border p-3 sm:col-span-2 lg:col-span-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="text-xs text-muted-foreground">vNF (Total NF)</div>
+                          <div className="text-2xl font-semibold">{formatBRL(totals.vNF)}</div>
+                        </div>
+
+                        {vnfExpected !== undefined && totals.vNF !== undefined && (
+                          <div className="text-right">
+                            <div className="text-xs text-muted-foreground">Composição esperada</div>
+                            <div className="text-sm font-semibold">{formatBRL(vnfExpected)}</div>
+                            {vnfDiff !== undefined && (
+                              <div className="text-xs text-muted-foreground">
+                                Diferença: <span className="font-mono">{formatNum(vnfDiff)}</span>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 )}
+
+                <ScrollArea className="h-[520px] pr-4">
+                  <div className="space-y-3">
+                    {filtered.length === 0 ? (
+                      <div className="text-sm text-muted-foreground">Nenhum item para este filtro/busca.</div>
+                    ) : (
+                      filtered.map((f, idx) => (
+                        <div key={`${f.code}-${idx}`} className="rounded-lg border p-4 space-y-2">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                {severityBadge(f.severity)}
+                                <span className="text-sm font-semibold">{f.title}</span>
+                                <span className="text-xs text-muted-foreground font-mono">{f.code}</span>
+                              </div>
+                              <div className="text-sm">{f.message}</div>
+                            </div>
+
+                            <div className="flex flex-wrap gap-2">
+                              <Button size="sm" variant="outline" onClick={() => copyFinding(f, 'message')}>
+                                {copiedFindingKey === `${f.code}-message` ? 'Copiado!' : 'Copiar'}
+                              </Button>
+                              <Button size="sm" variant="outline" onClick={() => copyFinding(f, 'json')}>
+                                {copiedFindingKey === `${f.code}-json` ? 'Copiado!' : 'JSON'}
+                              </Button>
+                              <Button size="sm" variant="outline" disabled={!f.path} onClick={() => copyFinding(f, 'path')}>
+                                {copiedFindingKey === `${f.code}-path` ? 'Copiado!' : 'Caminho'}
+                              </Button>
+                            </div>
+                          </div>
+
+                          {(f.path || f.hint) && (
+                            <div className="text-xs text-muted-foreground space-y-1">
+                              {f.path ? (
+                                <div>
+                                  <span className="font-medium">Caminho:</span>{' '}
+                                  <span className="font-mono">{f.path}</span>
+                                </div>
+                              ) : null}
+                              {f.hint ? (
+                                <div>
+                                  <span className="font-medium">Dica:</span> {f.hint}
+                                </div>
+                              ) : null}
+                            </div>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </ScrollArea>
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
+        {/* ---------------- BATCH ---------------- */}
+        <TabsContent value="batch" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Auditar em lote</CardTitle>
+              <CardDescription>
+                Selecione vários XMLs e gere uma tabela com status, totais e exportações (CSV/JSON).
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-center gap-3">
+                  <input
+                    type="file"
+                    multiple
+                    accept=".xml,text/xml,application/xml"
+                    onChange={(e) => {
+                      onPickBatchFiles(e.target.files)
+                    }}
+                  />
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      setBatchRows([])
+                      setBatchProgress({ done: 0, total: 0 })
+                      setBatchQuery('')
+                    }}
+                    disabled={batchLoading || batchRows.length === 0}
+                  >
+                    Limpar
+                  </Button>
+                </div>
+
+                <div className="flex gap-2">
+                  <Button
+                    onClick={() => {
+                      const inputEl = document.querySelector<HTMLInputElement>('input[type="file"][multiple]')
+                      if (!inputEl?.files || inputEl.files.length === 0) return
+                      runBatch(inputEl.files)
+                    }}
+                    disabled={batchLoading || batchRows.length === 0}
+                  >
+                    {batchLoading ? `Analisando... (${batchProgress.done}/${batchProgress.total})` : 'Analisar lote'}
+                  </Button>
+                </div>
               </div>
-            </ScrollArea>
-          </CardContent>
-        </Card>
-      )}
+
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-sm text-muted-foreground">
+                  Arquivos: <b>{batchRows.length}</b>
+                  {batchLoading || batchProgress.total > 0 ? (
+                    <>
+                      {' '}· Progresso: <b>{batchProgress.done}/{batchProgress.total}</b>
+                    </>
+                  ) : null}
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="outline" onClick={exportBatchCsv} disabled={batchRows.length === 0}>
+                    Exportar CSV
+                  </Button>
+                  <Button variant="outline" onClick={exportBatchJson} disabled={batchRows.length === 0}>
+                    Exportar JSON
+                  </Button>
+                </div>
+              </div>
+
+              <div className="sm:w-[420px]">
+                <Input
+                  value={batchQuery}
+                  onChange={(e) => setBatchQuery(e.target.value)}
+                  placeholder="Buscar no lote (arquivo, chave, emitente, destinatário...)"
+                />
+              </div>
+
+              <Separator />
+
+              <div className="rounded-lg border">
+                <div className="grid grid-cols-12 gap-2 px-3 py-2 text-xs text-muted-foreground">
+                  <div className="col-span-3">Arquivo</div>
+                  <div className="col-span-1">Status</div>
+                  <div className="col-span-1 text-right">Erros</div>
+                  <div className="col-span-1 text-right">Alertas</div>
+                  <div className="col-span-2">Emitente</div>
+                  <div className="col-span-2">Destinatário</div>
+                  <div className="col-span-1">nNF</div>
+                  <div className="col-span-1 text-right">vNF</div>
+                </div>
+                <Separator />
+
+                <ScrollArea className="h-[520px]">
+                  <div className="divide-y">
+                    {batchFiltered.length === 0 ? (
+                      <div className="p-4 text-sm text-muted-foreground">Nenhum registro para esta busca.</div>
+                    ) : (
+                      batchFiltered.map((r) => {
+                        const m = r.result?.meta
+                        const s = r.result?.summary
+                        const key = m?.accessKey ?? ''
+                        return (
+                          <div key={r.fileName} className="grid grid-cols-12 gap-2 px-3 py-3 text-sm">
+                            <div className="col-span-3">
+                              <div className="font-medium">{r.fileName}</div>
+                              {key ? (
+                                <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                                  <span className="font-mono truncate">{key}</span>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-7 px-2"
+                                    onClick={() => copyBatchValue(`${r.fileName}-key`, key)}
+                                  >
+                                    {batchCopied === `${r.fileName}-key` ? 'Copiado!' : 'Copiar'}
+                                  </Button>
+                                </div>
+                              ) : r.error ? (
+                                <div className="text-xs text-destructive">{r.error}</div>
+                              ) : null}
+                            </div>
+
+                            <div className="col-span-1">
+                              {r.result ? okBadge(r.result.ok) : r.error ? <Badge variant="destructive">Erro</Badge> : <Badge variant="secondary">-</Badge>}
+                            </div>
+
+                            <div className="col-span-1 text-right font-mono">{s?.errors ?? '-'}</div>
+                            <div className="col-span-1 text-right font-mono">{s?.warnings ?? '-'}</div>
+
+                            <div className="col-span-2 truncate" title={m?.emitName ?? ''}>
+                              {m?.emitName ?? '-'}
+                            </div>
+                            <div className="col-span-2 truncate" title={m?.destName ?? ''}>
+                              {m?.destName ?? '-'}
+                            </div>
+
+                            <div className="col-span-1 font-mono">{m?.nNF ?? '-'}</div>
+                            <div className="col-span-1 text-right font-mono">{m?.vNF !== undefined ? formatBRL(m.vNF) : '-'}</div>
+                          </div>
+                        )
+                      })
+                    )}
+                  </div>
+                </ScrollArea>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

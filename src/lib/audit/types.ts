@@ -10,11 +10,20 @@ export type Finding = {
 }
 
 export type AuditResult = {
-    ok: boolean
-    meta: {
+  ok: boolean
+  meta: {
     itemsCount: number
     hasNfeProc: boolean
     accessKey?: string
+
+    // novos
+    emitName?: string
+    destName?: string
+    nNF?: string
+    serie?: string
+    dhEmi?: string
+    vNF?: number
+
     totals?: {
       vProd?: number
       vDesc?: number
@@ -31,10 +40,10 @@ export type AuditResult = {
       vOutro: number
     }
   }
-    summary: {
-        errors: number
-        warnings: number
-        infos: number
-    }
-    findings: Finding[]
+  summary: {
+    errors: number
+    warnings: number
+    infos: number
+  }
+  findings: Finding[]
 }

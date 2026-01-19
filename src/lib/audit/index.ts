@@ -532,11 +532,26 @@ export function auditXml(input: unknown): AuditResult {
     }
   }
 
+  // ---- METAS ENRIQUECIDOS (para modo lote)
+  const emitName = String(parsed.emit?.xNome ?? '').trim() || undefined
+  const destName = String(parsed.dest?.xNome ?? '').trim() || undefined
+  const nNF = String((parsed.ide as any)?.nNF ?? '').trim() || undefined
+  const serie = String((parsed.ide as any)?.serie ?? '').trim() || undefined
+  const dhEmi = String(((parsed.ide as any)?.dhEmi ?? (parsed.ide as any)?.dEmi ?? '') as any).trim() || undefined
+
   return summarize({
     findings,
     itemsCount: parsed.det.length,
     hasNfeProc: parsed.hasNfeProc,
     accessKey: parsed.accessKey,
+
+    emitName,
+    destName,
+    nNF,
+    serie,
+    dhEmi,
+    vNF: totVNF ?? undefined,
+
     totals: {
       vProd: totVProd ?? undefined,
       vDesc: totVDesc ?? undefined,
@@ -560,6 +575,14 @@ function summarize(params: {
   itemsCount: number
   hasNfeProc: boolean
   accessKey?: string
+
+  emitName?: string
+  destName?: string
+  nNF?: string
+  serie?: string
+  dhEmi?: string
+  vNF?: number
+
   totals?: {
     vProd?: number
     vDesc?: number
@@ -586,6 +609,14 @@ function summarize(params: {
       itemsCount: params.itemsCount,
       hasNfeProc: params.hasNfeProc,
       accessKey: params.accessKey,
+
+      emitName: params.emitName,
+      destName: params.destName,
+      nNF: params.nNF,
+      serie: params.serie,
+      dhEmi: params.dhEmi,
+      vNF: params.vNF,
+
       totals: params.totals,
       sums: params.sums,
     },
