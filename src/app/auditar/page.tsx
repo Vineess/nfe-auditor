@@ -18,9 +18,33 @@ type Finding = {
   path?: string
   hint?: string
 }
+
+type TotalsMeta = {
+  vProd?: number
+  vDesc?: number
+  vFrete?: number
+  vSeg?: number
+  vOutro?: number
+  vNF?: number
+}
+
+type SumsMeta = {
+  vProd: number
+  vDesc: number
+  vFrete: number
+  vSeg: number
+  vOutro: number
+}
+
 type AuditResult = {
   ok: boolean
-  meta: { itemsCount: number; hasNfeProc: boolean; accessKey?: string }
+  meta: {
+    itemsCount: number
+    hasNfeProc: boolean
+    accessKey?: string
+    totals?: TotalsMeta
+    sums?: SumsMeta
+  }
   summary: { errors: number; warnings: number; infos: number }
   findings: Finding[]
 }
@@ -29,6 +53,16 @@ function severityBadge(sev: Severity) {
   if (sev === 'error') return <Badge variant="destructive">Erro</Badge>
   if (sev === 'warning') return <Badge variant="secondary">Alerta</Badge>
   return <Badge variant="outline">Info</Badge>
+}
+
+function formatBRL(v: number | undefined) {
+  if (v === undefined || v === null || Number.isNaN(v)) return '-'
+  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(v)
+}
+
+function formatNum(v: number | undefined) {
+  if (v === undefined || v === null || Number.isNaN(v)) return '-'
+  return new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v)
 }
 
 export default function AuditarPage() {
@@ -41,7 +75,7 @@ export default function AuditarPage() {
   const filtered = useMemo(() => {
     if (!result) return []
     if (filter === 'all') return result.findings
-    return result.findings.filter(f => f.severity === filter)
+    return result.findings.filter((f) => f.severity === filter)
   }, [result, filter])
 
   async function onAnalyze() {
@@ -81,6 +115,28 @@ export default function AuditarPage() {
     a.remove()
     URL.revokeObjectURL(url)
   }
+
+  const totals = result?.meta.totals
+  const sums = result?.meta.sums
+
+  // Heurística visual: diferença estimada do vNF
+  const vnfExpected =
+    totals?.vProd !== undefined
+      ? Number(
+          (
+            (totals.vProd || 0) +
+            (totals.vFrete || 0) +
+            (totals.vSeg || 0) +
+            (totals.vOutro || 0) -
+            (totals.vDesc || 0)
+          ).toFixed(2)
+        )
+      : undefined
+
+  const vnfDiff =
+    totals?.vNF !== undefined && vnfExpected !== undefined
+      ? Number((vnfExpected - (totals.vNF || 0)).toFixed(2))
+      : undefined
 
   return (
     <div className="mx-auto max-w-5xl p-6 space-y-6">
@@ -138,7 +194,8 @@ export default function AuditarPage() {
                   Itens: <b>{result.meta.itemsCount}</b> · nfeProc: <b>{result.meta.hasNfeProc ? 'sim' : 'não'}</b>
                   {result.meta.accessKey ? (
                     <>
-                      {' '}· chave: <b className="font-mono text-xs">{result.meta.accessKey}</b>
+                      {' '}
+                      · chave: <b className="font-mono text-xs">{result.meta.accessKey}</b>
                     </>
                   ) : null}
                 </CardDescription>
@@ -151,11 +208,7 @@ export default function AuditarPage() {
             </div>
 
             <div className="flex flex-wrap gap-2">
-              <Button
-                size="sm"
-                variant={filter === 'all' ? 'default' : 'secondary'}
-                onClick={() => setFilter('all')}
-              >
+              <Button size="sm" variant={filter === 'all' ? 'default' : 'secondary'} onClick={() => setFilter('all')}>
                 Todos ({result.findings.length})
               </Button>
               <Button
@@ -172,11 +225,7 @@ export default function AuditarPage() {
               >
                 Alertas ({result.summary.warnings})
               </Button>
-              <Button
-                size="sm"
-                variant={filter === 'info' ? 'default' : 'secondary'}
-                onClick={() => setFilter('info')}
-              >
+              <Button size="sm" variant={filter === 'info' ? 'default' : 'secondary'} onClick={() => setFilter('info')}>
                 Infos ({result.summary.infos})
               </Button>
             </div>
@@ -184,6 +233,60 @@ export default function AuditarPage() {
 
           <CardContent className="space-y-4">
             <Separator />
+
+            {/* Resumo Financeiro */}
+            {totals && (
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <div className="rounded-lg border p-3">
+                  <div className="text-xs text-muted-foreground">vProd</div>
+                  <div className="text-lg font-semibold">{formatBRL(totals.vProd)}</div>
+                  {sums?.vProd !== undefined && (
+                    <div className="text-xs text-muted-foreground">Soma itens: {formatBRL(sums.vProd)}</div>
+                  )}
+                </div>
+
+                <div className="rounded-lg border p-3">
+                  <div className="text-xs text-muted-foreground">vDesc</div>
+                  <div className="text-lg font-semibold">{formatBRL(totals.vDesc ?? 0)}</div>
+                  {sums?.vDesc !== undefined && (
+                    <div className="text-xs text-muted-foreground">Soma itens: {formatBRL(sums.vDesc)}</div>
+                  )}
+                </div>
+
+                <div className="rounded-lg border p-3">
+                  <div className="text-xs text-muted-foreground">vFrete / vSeg / vOutro</div>
+                  <div className="text-sm font-semibold">
+                    {formatBRL(totals.vFrete ?? 0)} / {formatBRL(totals.vSeg ?? 0)} / {formatBRL(totals.vOutro ?? 0)}
+                  </div>
+                  {sums && (
+                    <div className="text-xs text-muted-foreground">
+                      Itens: {formatBRL(sums.vFrete)} / {formatBRL(sums.vSeg)} / {formatBRL(sums.vOutro)}
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-lg border p-3 sm:col-span-2 lg:col-span-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs text-muted-foreground">vNF (Total NF)</div>
+                      <div className="text-2xl font-semibold">{formatBRL(totals.vNF)}</div>
+                    </div>
+
+                    {vnfExpected !== undefined && totals.vNF !== undefined && (
+                      <div className="text-right">
+                        <div className="text-xs text-muted-foreground">Composição esperada</div>
+                        <div className="text-sm font-semibold">{formatBRL(vnfExpected)}</div>
+                        {vnfDiff !== undefined && (
+                          <div className="text-xs text-muted-foreground">
+                            Diferença: <span className="font-mono">{formatNum(vnfDiff)}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
 
             <ScrollArea className="h-[520px] pr-4">
               <div className="space-y-3">

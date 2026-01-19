@@ -270,26 +270,44 @@ export function auditXml(input: unknown): AuditResult {
     })
   }
 
-  // ---- Regra: totais vs itens (vProd + vDesc)
+  // ---- Regra: totais vs itens + composições financeiras
   const itens = parsed.det
 
   let sumVProd = 0
   let sumVDesc = 0
+  let sumVFrete = 0
+  let sumVSeg = 0
+  let sumVOutro = 0
   let vProdMissing = 0
 
   for (const d of itens) {
     const vProd = toNumber(get(d, 'prod.vProd'))
     const vDesc = toNumber(get(d, 'prod.vDesc'))
+    const vFrete = toNumber(get(d, 'prod.vFrete'))
+    const vSeg = toNumber(get(d, 'prod.vSeg'))
+    const vOutro = toNumber(get(d, 'prod.vOutro'))
+
     if (vProd === null) vProdMissing++
     else sumVProd += vProd
+
     if (vDesc !== null) sumVDesc += vDesc
+    if (vFrete !== null) sumVFrete += vFrete
+    if (vSeg !== null) sumVSeg += vSeg
+    if (vOutro !== null) sumVOutro += vOutro
   }
 
   sumVProd = round2(sumVProd)
   sumVDesc = round2(sumVDesc)
+  sumVFrete = round2(sumVFrete)
+  sumVSeg = round2(sumVSeg)
+  sumVOutro = round2(sumVOutro)
 
   const totVProd = toNumber(parsed.totals?.vProd)
   const totVDesc = toNumber(parsed.totals?.vDesc)
+  const totVFrete = toNumber(parsed.totals?.vFrete)
+  const totVSeg = toNumber(parsed.totals?.vSeg)
+  const totVOutro = toNumber(parsed.totals?.vOutro)
+  const totVNF = toNumber(parsed.totals?.vNF)
 
   if (!parsed.totals) {
     push(findings, {
@@ -349,6 +367,74 @@ export function auditXml(input: unknown): AuditResult {
           code: 'TOTAL_VDESC_OK',
           title: 'Total de desconto OK',
           message: `Soma dos descontos dos itens bate com vDesc (${totVDesc}).`,
+        })
+      }
+    }
+
+    if (totVFrete !== null && sumVFrete > 0) {
+      const diff = round2(sumVFrete - totVFrete)
+      if (Math.abs(diff) > 0.01) {
+        push(findings, {
+          severity: 'warning',
+          code: 'TOTAL_VFRETE_MISMATCH',
+          title: 'Frete pode não conferir',
+          message: `Soma vFrete(itens)=${sumVFrete} mas total vFrete=${totVFrete} (diferença ${diff}).`,
+          path: 'NFe.infNFe.total.ICMSTot.vFrete',
+          hint: 'Verifique se o frete foi lançado nos itens ou apenas no total.',
+        })
+      }
+    }
+
+    if (totVSeg !== null && sumVSeg > 0) {
+      const diff = round2(sumVSeg - totVSeg)
+      if (Math.abs(diff) > 0.01) {
+        push(findings, {
+          severity: 'warning',
+          code: 'TOTAL_VSEG_MISMATCH',
+          title: 'Seguro pode não conferir',
+          message: `Soma vSeg(itens)=${sumVSeg} mas total vSeg=${totVSeg} (diferença ${diff}).`,
+          path: 'NFe.infNFe.total.ICMSTot.vSeg',
+          hint: 'Verifique se o seguro foi lançado nos itens ou apenas no total.',
+        })
+      }
+    }
+
+    if (totVOutro !== null && sumVOutro > 0) {
+      const diff = round2(sumVOutro - totVOutro)
+      if (Math.abs(diff) > 0.01) {
+        push(findings, {
+          severity: 'warning',
+          code: 'TOTAL_VOUTRO_MISMATCH',
+          title: 'Outras despesas pode não conferir',
+          message: `Soma vOutro(itens)=${sumVOutro} mas total vOutro=${totVOutro} (diferença ${diff}).`,
+          path: 'NFe.infNFe.total.ICMSTot.vOutro',
+          hint: 'Verifique se outras despesas foram lançadas nos itens ou no total.',
+        })
+      }
+    }
+
+    // Validação simples do vNF (heurística)
+    if (totVNF !== null && totVProd !== null) {
+      const expected = round2(
+        (totVProd || 0) + (totVFrete || 0) + (totVSeg || 0) + (totVOutro || 0) - (totVDesc || 0)
+      )
+      const diff = round2(expected - totVNF)
+
+      if (Math.abs(diff) > 0.01) {
+        push(findings, {
+          severity: 'warning',
+          code: 'TOTAL_VNF_SUSPECT',
+          title: 'vNF pode estar inconsistente',
+          message: `Esperado vNF≈${expected}, mas total vNF=${totVNF} (diferença ${diff}).`,
+          path: 'NFe.infNFe.total.ICMSTot.vNF',
+          hint: 'Confira a composição do total: produtos + frete/seguro/outros - desconto (e arredondamentos).',
+        })
+      } else {
+        push(findings, {
+          severity: 'info',
+          code: 'TOTAL_VNF_OK',
+          title: 'vNF consistente',
+          message: `vNF parece consistente com a composição (≈${expected}).`,
         })
       }
     }
@@ -451,6 +537,21 @@ export function auditXml(input: unknown): AuditResult {
     itemsCount: parsed.det.length,
     hasNfeProc: parsed.hasNfeProc,
     accessKey: parsed.accessKey,
+    totals: {
+      vProd: totVProd ?? undefined,
+      vDesc: totVDesc ?? undefined,
+      vFrete: totVFrete ?? undefined,
+      vSeg: totVSeg ?? undefined,
+      vOutro: totVOutro ?? undefined,
+      vNF: totVNF ?? undefined,
+    },
+    sums: {
+      vProd: sumVProd,
+      vDesc: sumVDesc,
+      vFrete: sumVFrete,
+      vSeg: sumVSeg,
+      vOutro: sumVOutro,
+    },
   })
 }
 
@@ -459,6 +560,21 @@ function summarize(params: {
   itemsCount: number
   hasNfeProc: boolean
   accessKey?: string
+  totals?: {
+    vProd?: number
+    vDesc?: number
+    vFrete?: number
+    vSeg?: number
+    vOutro?: number
+    vNF?: number
+  }
+  sums?: {
+    vProd: number
+    vDesc: number
+    vFrete: number
+    vSeg: number
+    vOutro: number
+  }
 }): AuditResult {
   const errors = params.findings.filter((f) => f.severity === 'error').length
   const warnings = params.findings.filter((f) => f.severity === 'warning').length
@@ -470,6 +586,8 @@ function summarize(params: {
       itemsCount: params.itemsCount,
       hasNfeProc: params.hasNfeProc,
       accessKey: params.accessKey,
+      totals: params.totals,
+      sums: params.sums,
     },
     summary: { errors, warnings, infos },
     findings: params.findings,
