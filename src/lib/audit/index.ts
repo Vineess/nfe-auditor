@@ -1,8 +1,9 @@
 import { z } from 'zod'
 import { parseNFeXml } from './parse'
 import type { AuditResult, Finding } from './types'
-import { asArray, calcNfeKeyDV, get, round2, toNumber } from './utils'
+import { calcNfeKeyDV, get, round2, toNumber } from './utils'
 import { isValidCPF, isValidCNPJ } from './br'
+import { isValidCEP, isInternalCfop, isInterstateCfop } from './br-ops'
 
 const InputSchema = z.object({
   xml: z.string().min(10, 'XML vazio ou muito curto'),
@@ -57,7 +58,12 @@ export function auditXml(input: unknown): AuditResult {
       path: 'NFe.infNFe',
       hint: 'Confirme se este XML é de NF-e (modelo 55) e se contém a estrutura padrão (nfeProc/NFe/infNFe).',
     })
-    return summarize({ findings, itemsCount: 0, hasNfeProc: parsed.hasNfeProc, accessKey: parsed.accessKey })
+    return summarize({
+      findings,
+      itemsCount: 0,
+      hasNfeProc: parsed.hasNfeProc,
+      accessKey: parsed.accessKey,
+    })
   }
 
   if (parsed.det.length === 0) {
@@ -143,15 +149,16 @@ export function auditXml(input: unknown): AuditResult {
       severity: 'warning',
       code: 'DEST_MISSING',
       title: 'Destinatário ausente',
-      message: 'Não encontrei dest dentro de infNFe (em algumas operações pode existir, mas geralmente é obrigatório).',
+      message:
+        'Não encontrei dest dentro de infNFe (em algumas operações pode existir, mas geralmente é obrigatório).',
       path: 'NFe.infNFe.dest',
     })
   }
 
-    // ---- Regra: CPF/CNPJ emitente/destinatário
+  // ---- Regra: CPF/CNPJ emitente/destinatário
   const emitCnpj = parsed.emit?.CNPJ ?? parsed.emit?.CPF
   if (emitCnpj) {
-    const isCnpj = String(emitCnpj).replace(/\D/g,'').length === 14
+    const isCnpj = String(emitCnpj).replace(/\D/g, '').length === 14
     const ok = isCnpj ? isValidCNPJ(String(emitCnpj)) : isValidCPF(String(emitCnpj))
     if (!ok) {
       push(findings, {
@@ -184,7 +191,7 @@ export function auditXml(input: unknown): AuditResult {
   const destDoc = parsed.dest?.CNPJ ?? parsed.dest?.CPF
   if (parsed.dest) {
     if (destDoc) {
-      const isCnpj = String(destDoc).replace(/\D/g,'').length === 14
+      const isCnpj = String(destDoc).replace(/\D/g, '').length === 14
       const ok = isCnpj ? isValidCNPJ(String(destDoc)) : isValidCPF(String(destDoc))
       if (!ok) {
         push(findings, {
@@ -215,6 +222,53 @@ export function auditXml(input: unknown): AuditResult {
     }
   }
 
+  // ---- Regra: UF emit/dest e CEP
+  const ufEmit = String(parsed.emit?.enderEmit?.UF ?? '').trim().toUpperCase()
+  const ufDest = String(parsed.dest?.enderDest?.UF ?? '').trim().toUpperCase()
+
+  if (!ufEmit) {
+    push(findings, {
+      severity: 'warning',
+      code: 'EMIT_UF_MISSING',
+      title: 'UF do emitente ausente',
+      message: 'Não encontrei enderEmit.UF no emitente.',
+      path: 'NFe.infNFe.emit.enderEmit.UF',
+    })
+  }
+
+  if (parsed.dest && !ufDest) {
+    push(findings, {
+      severity: 'warning',
+      code: 'DEST_UF_MISSING',
+      title: 'UF do destinatário ausente',
+      message: 'Não encontrei enderDest.UF no destinatário.',
+      path: 'NFe.infNFe.dest.enderDest.UF',
+    })
+  }
+
+  const cepEmit = String(parsed.emit?.enderEmit?.CEP ?? '').trim()
+  if (cepEmit && !isValidCEP(cepEmit)) {
+    push(findings, {
+      severity: 'warning',
+      code: 'EMIT_CEP_INVALID',
+      title: 'CEP do emitente inválido',
+      message: 'O CEP do emitente parece inválido (esperado 8 dígitos).',
+      path: 'NFe.infNFe.emit.enderEmit.CEP',
+      hint: 'Informe CEP com 8 dígitos (somente números).',
+    })
+  }
+
+  const cepDest = String(parsed.dest?.enderDest?.CEP ?? '').trim()
+  if (parsed.dest && cepDest && !isValidCEP(cepDest)) {
+    push(findings, {
+      severity: 'warning',
+      code: 'DEST_CEP_INVALID',
+      title: 'CEP do destinatário inválido',
+      message: 'O CEP do destinatário parece inválido (esperado 8 dígitos).',
+      path: 'NFe.infNFe.dest.enderDest.CEP',
+      hint: 'Informe CEP com 8 dígitos (somente números).',
+    })
+  }
 
   // ---- Regra: totais vs itens (vProd + vDesc)
   const itens = parsed.det
@@ -300,7 +354,7 @@ export function auditXml(input: unknown): AuditResult {
     }
   }
 
-  // ---- Regra: itens com quantidade/preço zerados (bem comum)
+  // ---- Regras por item: quantidade/preço + CFOP x UF + NCM
   for (let i = 0; i < itens.length; i++) {
     const d = itens[i]
     const qCom = toNumber(get(d, 'prod.qCom'))
@@ -328,6 +382,68 @@ export function auditXml(input: unknown): AuditResult {
         hint: 'Confirme se o valor unitário está correto.',
       })
     }
+
+    // ---- Regra: CFOP x UF (interna/interestadual) - heurística
+    const cfop = get(d, 'prod.CFOP')
+
+    if (cfop && ufEmit && ufDest) {
+      const same = ufEmit === ufDest
+      const internal = isInternalCfop(cfop)
+      const interstate = isInterstateCfop(cfop)
+
+      if (same && interstate) {
+        push(findings, {
+          severity: 'warning',
+          code: 'CFOP_UF_MISMATCH',
+          title: 'CFOP sugere interestadual, mas UF é igual',
+          message: `Item ${i + 1}${cProd ? ` (${cProd})` : ''}: CFOP ${cfop} costuma ser interestadual, porém emit/dest são ${ufEmit}/${ufDest}.`,
+          path: `NFe.infNFe.det[${i}].prod.CFOP`,
+          hint: 'Confira se a operação é realmente interestadual ou se o CFOP deve ser interno.',
+        })
+      }
+
+      if (!same && internal) {
+        push(findings, {
+          severity: 'warning',
+          code: 'CFOP_UF_MISMATCH',
+          title: 'CFOP sugere interno, mas UF é diferente',
+          message: `Item ${i + 1}${cProd ? ` (${cProd})` : ''}: CFOP ${cfop} costuma ser interno, porém emit/dest são ${ufEmit}/${ufDest}.`,
+          path: `NFe.infNFe.det[${i}].prod.CFOP`,
+          hint: 'Confira se a operação é interna ou se o CFOP deve ser interestadual.',
+        })
+      }
+    } else if (!cfop) {
+      push(findings, {
+        severity: 'warning',
+        code: 'CFOP_MISSING',
+        title: 'CFOP ausente no item',
+        message: `Item ${i + 1}${cProd ? ` (${cProd})` : ''}: não encontrei prod.CFOP.`,
+        path: `NFe.infNFe.det[${i}].prod.CFOP`,
+        hint: 'Cada item deve ter CFOP preenchido.',
+      })
+    }
+
+    // ---- Regra: NCM básico (8 dígitos)
+    const ncm = String(get(d, 'prod.NCM') ?? '').replace(/\D/g, '')
+    if (!ncm) {
+      push(findings, {
+        severity: 'warning',
+        code: 'NCM_MISSING',
+        title: 'NCM ausente no item',
+        message: `Item ${i + 1}${cProd ? ` (${cProd})` : ''}: NCM não informado.`,
+        path: `NFe.infNFe.det[${i}].prod.NCM`,
+        hint: 'Informe o NCM do produto (geralmente 8 dígitos).',
+      })
+    } else if (ncm.length !== 8) {
+      push(findings, {
+        severity: 'warning',
+        code: 'NCM_INVALID_LEN',
+        title: 'NCM com tamanho inválido',
+        message: `Item ${i + 1}${cProd ? ` (${cProd})` : ''}: NCM com ${ncm.length} dígitos (esperado 8).`,
+        path: `NFe.infNFe.det[${i}].prod.NCM`,
+        hint: 'Verifique se o NCM está completo (8 dígitos).',
+      })
+    }
   }
 
   return summarize({
@@ -344,9 +460,9 @@ function summarize(params: {
   hasNfeProc: boolean
   accessKey?: string
 }): AuditResult {
-  const errors = params.findings.filter(f => f.severity === 'error').length
-  const warnings = params.findings.filter(f => f.severity === 'warning').length
-  const infos = params.findings.filter(f => f.severity === 'info').length
+  const errors = params.findings.filter((f) => f.severity === 'error').length
+  const warnings = params.findings.filter((f) => f.severity === 'warning').length
+  const infos = params.findings.filter((f) => f.severity === 'info').length
 
   return {
     ok: errors === 0,
