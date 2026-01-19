@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Input } from '@/components/ui/input'
 
 type Severity = 'error' | 'warning' | 'info'
 type Finding = {
@@ -65,18 +66,61 @@ function formatNum(v: number | undefined) {
   return new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v)
 }
 
+async function copyToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.left = '-9999px'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      ta.remove()
+      return true
+    } catch {
+      return false
+    }
+  }
+}
+
 export default function AuditarPage() {
   const [xml, setXml] = useState('')
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<AuditResult | null>(null)
   const [filter, setFilter] = useState<Severity | 'all'>('all')
+  const [query, setQuery] = useState('')
   const [err, setErr] = useState<string | null>(null)
+
+  const [copiedKey, setCopiedKey] = useState(false)
+  const [copiedJson, setCopiedJson] = useState(false)
+  const [copiedFindingKey, setCopiedFindingKey] = useState<string | null>(null)
 
   const filtered = useMemo(() => {
     if (!result) return []
-    if (filter === 'all') return result.findings
-    return result.findings.filter((f) => f.severity === filter)
-  }, [result, filter])
+    const base = filter === 'all' ? result.findings : result.findings.filter((f) => f.severity === filter)
+
+    const q = query.trim().toLowerCase()
+    if (!q) return base
+
+    return base.filter((f) => {
+      const hay = [
+        f.severity,
+        f.code,
+        f.title,
+        f.message,
+        f.path ?? '',
+        f.hint ?? '',
+      ]
+        .join(' ')
+        .toLowerCase()
+
+      return hay.includes(q)
+    })
+  }, [result, filter, query])
 
   async function onAnalyze() {
     setErr(null)
@@ -116,10 +160,39 @@ export default function AuditarPage() {
     URL.revokeObjectURL(url)
   }
 
+  async function copyAccessKey() {
+    const key = result?.meta.accessKey
+    if (!key) return
+    const ok = await copyToClipboard(key)
+    if (!ok) return
+    setCopiedKey(true)
+    setTimeout(() => setCopiedKey(false), 1200)
+  }
+
+  async function copyWholeJson() {
+    if (!result) return
+    const ok = await copyToClipboard(JSON.stringify(result, null, 2))
+    if (!ok) return
+    setCopiedJson(true)
+    setTimeout(() => setCopiedJson(false), 1200)
+  }
+
+  async function copyFinding(f: Finding, kind: 'message' | 'path' | 'json') {
+    let payload = ''
+    if (kind === 'message') payload = `${f.title}\n${f.message}`
+    if (kind === 'path') payload = f.path ?? ''
+    if (kind === 'json') payload = JSON.stringify(f, null, 2)
+
+    if (!payload) return
+    const ok = await copyToClipboard(payload)
+    if (!ok) return
+    setCopiedFindingKey(`${f.code}-${kind}`)
+    setTimeout(() => setCopiedFindingKey(null), 1200)
+  }
+
   const totals = result?.meta.totals
   const sums = result?.meta.sums
 
-  // Heurística visual: diferença estimada do vNF
   const vnfExpected =
     totals?.vProd !== undefined
       ? Number(
@@ -200,34 +273,57 @@ export default function AuditarPage() {
                   ) : null}
                 </CardDescription>
               </div>
-              <div className="flex gap-2">
+
+              <div className="flex flex-wrap gap-2">
                 <Button variant="outline" onClick={exportJson}>
                   Exportar JSON
                 </Button>
+                <Button variant="outline" onClick={copyWholeJson}>
+                  {copiedJson ? 'Copiado!' : 'Copiar JSON'}
+                </Button>
+                {result.meta.accessKey && (
+                  <Button variant="outline" onClick={copyAccessKey}>
+                    {copiedKey ? 'Copiado!' : 'Copiar chave'}
+                  </Button>
+                )}
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              <Button size="sm" variant={filter === 'all' ? 'default' : 'secondary'} onClick={() => setFilter('all')}>
-                Todos ({result.findings.length})
-              </Button>
-              <Button
-                size="sm"
-                variant={filter === 'error' ? 'default' : 'secondary'}
-                onClick={() => setFilter('error')}
-              >
-                Erros ({result.summary.errors})
-              </Button>
-              <Button
-                size="sm"
-                variant={filter === 'warning' ? 'default' : 'secondary'}
-                onClick={() => setFilter('warning')}
-              >
-                Alertas ({result.summary.warnings})
-              </Button>
-              <Button size="sm" variant={filter === 'info' ? 'default' : 'secondary'} onClick={() => setFilter('info')}>
-                Infos ({result.summary.infos})
-              </Button>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant={filter === 'all' ? 'default' : 'secondary'} onClick={() => setFilter('all')}>
+                  Todos ({result.findings.length})
+                </Button>
+                <Button
+                  size="sm"
+                  variant={filter === 'error' ? 'default' : 'secondary'}
+                  onClick={() => setFilter('error')}
+                >
+                  Erros ({result.summary.errors})
+                </Button>
+                <Button
+                  size="sm"
+                  variant={filter === 'warning' ? 'default' : 'secondary'}
+                  onClick={() => setFilter('warning')}
+                >
+                  Alertas ({result.summary.warnings})
+                </Button>
+                <Button
+                  size="sm"
+                  variant={filter === 'info' ? 'default' : 'secondary'}
+                  onClick={() => setFilter('info')}
+                >
+                  Infos ({result.summary.infos})
+                </Button>
+              </div>
+
+              <div className="sm:w-[340px]">
+                <Input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Buscar (código, título, mensagem, caminho...)"
+                />
+              </div>
             </div>
           </CardHeader>
 
@@ -291,7 +387,7 @@ export default function AuditarPage() {
             <ScrollArea className="h-[520px] pr-4">
               <div className="space-y-3">
                 {filtered.length === 0 ? (
-                  <div className="text-sm text-muted-foreground">Nenhum item para este filtro.</div>
+                  <div className="text-sm text-muted-foreground">Nenhum item para este filtro/busca.</div>
                 ) : (
                   filtered.map((f, idx) => (
                     <div key={`${f.code}-${idx}`} className="rounded-lg border p-4 space-y-2">
@@ -303,6 +399,23 @@ export default function AuditarPage() {
                             <span className="text-xs text-muted-foreground font-mono">{f.code}</span>
                           </div>
                           <div className="text-sm">{f.message}</div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          <Button size="sm" variant="outline" onClick={() => copyFinding(f, 'message')}>
+                            {copiedFindingKey === `${f.code}-message` ? 'Copiado!' : 'Copiar'}
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => copyFinding(f, 'json')}>
+                            {copiedFindingKey === `${f.code}-json` ? 'Copiado!' : 'JSON'}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={!f.path}
+                            onClick={() => copyFinding(f, 'path')}
+                          >
+                            {copiedFindingKey === `${f.code}-path` ? 'Copiado!' : 'Caminho'}
+                          </Button>
                         </div>
                       </div>
 
