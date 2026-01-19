@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { parseNFeXml } from './parse'
 import type { AuditResult, Finding } from './types'
 import { asArray, calcNfeKeyDV, get, round2, toNumber } from './utils'
+import { isValidCPF, isValidCNPJ } from './br'
 
 const InputSchema = z.object({
   xml: z.string().min(10, 'XML vazio ou muito curto'),
@@ -146,6 +147,74 @@ export function auditXml(input: unknown): AuditResult {
       path: 'NFe.infNFe.dest',
     })
   }
+
+    // ---- Regra: CPF/CNPJ emitente/destinatário
+  const emitCnpj = parsed.emit?.CNPJ ?? parsed.emit?.CPF
+  if (emitCnpj) {
+    const isCnpj = String(emitCnpj).replace(/\D/g,'').length === 14
+    const ok = isCnpj ? isValidCNPJ(String(emitCnpj)) : isValidCPF(String(emitCnpj))
+    if (!ok) {
+      push(findings, {
+        severity: 'error',
+        code: 'EMIT_DOC_INVALID',
+        title: 'Documento do emitente inválido',
+        message: `O ${isCnpj ? 'CNPJ' : 'CPF'} do emitente parece inválido.`,
+        path: 'NFe.infNFe.emit',
+        hint: 'Verifique o número e os dígitos verificadores do documento do emitente.',
+      })
+    } else {
+      push(findings, {
+        severity: 'info',
+        code: 'EMIT_DOC_OK',
+        title: 'Documento do emitente OK',
+        message: `Documento do emitente (${isCnpj ? 'CNPJ' : 'CPF'}) válido.`,
+      })
+    }
+  } else {
+    push(findings, {
+      severity: 'warning',
+      code: 'EMIT_DOC_MISSING',
+      title: 'Documento do emitente ausente',
+      message: 'Não encontrei CNPJ/CPF no emitente.',
+      path: 'NFe.infNFe.emit.CNPJ',
+      hint: 'O emitente deve ter CNPJ (ou CPF em casos específicos).',
+    })
+  }
+
+  const destDoc = parsed.dest?.CNPJ ?? parsed.dest?.CPF
+  if (parsed.dest) {
+    if (destDoc) {
+      const isCnpj = String(destDoc).replace(/\D/g,'').length === 14
+      const ok = isCnpj ? isValidCNPJ(String(destDoc)) : isValidCPF(String(destDoc))
+      if (!ok) {
+        push(findings, {
+          severity: 'warning',
+          code: 'DEST_DOC_INVALID',
+          title: 'Documento do destinatário suspeito',
+          message: `O ${isCnpj ? 'CNPJ' : 'CPF'} do destinatário parece inválido.`,
+          path: 'NFe.infNFe.dest',
+          hint: 'Verifique o número e os dígitos verificadores do documento do destinatário.',
+        })
+      } else {
+        push(findings, {
+          severity: 'info',
+          code: 'DEST_DOC_OK',
+          title: 'Documento do destinatário OK',
+          message: `Documento do destinatário (${isCnpj ? 'CNPJ' : 'CPF'}) válido.`,
+        })
+      }
+    } else {
+      push(findings, {
+        severity: 'warning',
+        code: 'DEST_DOC_MISSING',
+        title: 'Documento do destinatário ausente',
+        message: 'Não encontrei CNPJ/CPF no destinatário.',
+        path: 'NFe.infNFe.dest.CNPJ',
+        hint: 'Geralmente o destinatário deve ter CNPJ/CPF, dependendo do tipo de operação.',
+      })
+    }
+  }
+
 
   // ---- Regra: totais vs itens (vProd + vDesc)
   const itens = parsed.det
